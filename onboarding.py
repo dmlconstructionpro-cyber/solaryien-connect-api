@@ -23,6 +23,14 @@ REQUIRED_AGREEMENTS = (
     "terms_of_service",
 )
 
+# Documents every contractor must upload at sign-up (none skippable).
+REQUIRED_DOCS = ("gov_id", "insurance", "business_license")
+# Workers' comp: exactly one of these must be provided.
+WC_DOCS = ("wc_certificate", "wc_exclusion")
+# Contractor license is CONDITIONAL — only required when the trade/state mandates
+# it. The client enforces this based on the chosen trade; it is not part of the
+# always-required readiness set below.
+
 
 # ── Step 2: business profile ─────────────────────────────────────────────
 def update_business_profile(conn, pro_id, *, trades=None, regions=None,
@@ -45,7 +53,9 @@ def update_business_profile(conn, pro_id, *, trades=None, regions=None,
 
 # ── Step 3: documents + agreements ───────────────────────────────────────
 def store_document(conn, pro_id, doc_type, filename, mime, content):
-    """Store/replace a document BLOB (doc_type: 'coi' | 'license')."""
+    """Store/replace a document BLOB. doc_type is one of: gov_id, insurance,
+    business_license, contractor_license, wc_certificate, wc_exclusion (legacy:
+    coi, license)."""
     conn.execute(
         """INSERT INTO pro_documents (pro_id, doc_type, filename, mime, content)
            VALUES (?, ?, ?, ?, ?)
@@ -79,15 +89,19 @@ def verification_checklist(conn, pro_id):
     agrees = {r["agreement_type"] for r in conn.execute(
         "SELECT agreement_type FROM pro_agreements WHERE pro_id = ?", (pro_id,)).fetchall()}
     return {
-        "coi": "coi" in docs,
-        "license": "license" in docs,
+        "gov_id": "gov_id" in docs,
+        "insurance": ("insurance" in docs) or ("coi" in docs),  # legacy alias
+        "business_license": "business_license" in docs,
+        "contractor_license": ("contractor_license" in docs) or ("license" in docs),
+        "workers_comp": any(d in docs for d in WC_DOCS),
         "agreements": {a: (a in agrees) for a in REQUIRED_AGREEMENTS},
     }
 
 
 def is_ready_for_verification(conn, pro_id):
     c = verification_checklist(conn, pro_id)
-    return c["coi"] and all(c["agreements"].values())
+    return (c["gov_id"] and c["insurance"] and c["business_license"]
+            and c["workers_comp"] and all(c["agreements"].values()))
 
 
 def submit_for_verification(conn, pro_id):
@@ -143,19 +157,23 @@ def reject(conn, pro_id, reason=None):
 
 # ── Step 5: confirmation email ───────────────────────────────────────────
 def signup_confirmation_email(pro, plan=None, lp_claim=None):
-    plan_name = {"standard": "Connect Standard", "pro": "Connect Pro",
-                 "complete": "Connect Complete"}.get((plan or "").lower(), "your selected plan")
+    tier = (lp_claim or {}).get("apex_tier")
+    tier_name = (tier or "your chosen").title() if tier else "your chosen"
     lp_line = ""
     if lp_claim:
-        lp_line = ("\nAs a Launch Partner, you've locked in 50% off Apex for 3 months and a "
-                   "free 3-month Connect Standard plan (3 regions).\n")
+        lp_line = (f"\nAs a Launch Partner you onboarded free at the {tier_name} tier "
+                   f"(locked in): 1 month of Apex free now as a beta tester, then at launch "
+                   f"3 months of Connect free + 3 months of Apex at 50% off.\n")
     return ("Your Solaryien Connect application is in — pending verification",
             f"Hi {pro.get('name', 'there')},\n\n"
-            f"Thanks for signing up for Solaryien Connect. Here's where things stand:\n\n"
-            f"  - Plan: {plan_name}\n"
+            f"Thanks for joining Solaryien Connect. Here's where things stand:\n\n"
             f"  - Status: Pending Verification\n"
+            f"  - Tier: {tier_name}\n"
             f"{lp_line}\n"
-            f"Our team at Solaryien, Inc. is reviewing your documents (insurance, license "
-            f"where required, background-check authorization, and signed agreements). You can "
-            f"expect approval within 1-2 business days, and we'll email you as soon as your "
-            f"account is verified and active.\n\n— Solaryien Connect")
+            f"Our team at Solaryien, Inc. is reviewing your documents (government ID, proof of "
+            f"insurance, business license, contractor license where required, workers' comp, "
+            f"and signed agreements). Expect approval within 1-2 business days.\n\n"
+            f"IMPORTANT — background check: a one-time $50 background check is required before "
+            f"the platform launches. It was NOT charged at sign-up. You'll get a separate "
+            f"notice with a window to complete it; no contractor is active at launch without "
+            f"it.\n\n— Solaryien Connect")

@@ -41,11 +41,22 @@ def main():
     lp.claim_seat(conn, p2, now=base)
     ok("remaining == 4998 after second signup", lp.get_status(conn)["remaining"] == 4998)
 
-    print("\n[3] Apex pricing is 50% off; trial is 3 months")
-    ok("starter 150/300", lp.APEX_TIERS["starter"] == {"normal": 300, "launch": 150})
-    ok("professional 300/600", lp.APEX_TIERS["professional"] == {"normal": 600, "launch": 300})
-    ok("enterprise 600/1200", lp.APEX_TIERS["enterprise"] == {"normal": 1200, "launch": 600})
+    print("\n[3] Apex annual pricing with 50%-off launch price + seats")
+    ok("starter 1200/600 (1 seat)",
+       lp.APEX_TIERS["starter"] == {"normal": 1200, "launch": 600, "seats": 1})
+    ok("professional 2500/1250 (3 seats)",
+       lp.APEX_TIERS["professional"] == {"normal": 2500, "launch": 1250, "seats": 3})
+    ok("enterprise 4000/2000 (5 seats)",
+       lp.APEX_TIERS["enterprise"] == {"normal": 4000, "launch": 2000, "seats": 5})
+    ok("launch price is 50% of normal",
+       all(t["launch"] == t["normal"] // 2 for t in lp.APEX_TIERS.values()))
     ok("trial_end is +3 months", claim["trial_end"][:10] == "2026-09-01")
+
+    print("\n[3b] Tier is locked once chosen (no free mid-program upgrade)")
+    # p1 claimed at 'professional' above.
+    ok("set_apex_tier keeps locked tier",
+       lp.set_apex_tier(conn, p1, "enterprise") == "professional")
+    ok("claim still professional", lp.get_claim(conn, p1)["apex_tier"] == "professional")
 
     print("\n[4] A pro can't double-claim (no double decrement)")
     again = lp.claim_seat(conn, p1, now=base)

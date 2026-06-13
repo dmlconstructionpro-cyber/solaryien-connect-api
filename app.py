@@ -208,6 +208,120 @@ def signup():
                    verify_url=verify_url, email_verified=False), 201
 
 
+def _form_list(form, key):
+    """Read a list from multipart form: repeated fields or a JSON-array string."""
+    vals = form.getlist(key)
+    if len(vals) == 1 and vals[0].strip().startswith("["):
+        try:
+            return json.loads(vals[0])
+        except Exception:
+            return [vals[0]]
+    return vals
+
+
+# Files accepted at registration -> stored doc_type. Contractor license + the two
+# workers'-comp options are conditional/either-or; the rest are always required.
+_REGISTER_DOCS = {
+    "gov_id": "gov_id",
+    "insurance": "insurance",
+    "business_license": "business_license",
+    "contractor_license": "contractor_license",
+    "wc_certificate": "wc_certificate",
+    "wc_exclusion": "wc_exclusion",
+}
+
+
+@app.post("/api/pro/register")
+def pro_register():
+    """
+    Single-flow contractor registration (multipart/form-data). The account is
+    created here, at the END of the guided sign-up, only after every step is
+    collected: account details, locked Apex tier, all required documents, and
+    the dashboard/business profile. No payment is taken. Claims a free Launch
+    Partner seat at the locked tier.
+
+    Form fields: name, company, email, phone, password, apex_tier,
+      trades (JSON or repeated), regions (JSON or repeated), years_in_business,
+      website, bio, bg_sign_name, agreement_sign_name, tos_sign_name.
+    Files: gov_id, insurance, business_license (required); contractor_license
+      (conditional); exactly one of wc_certificate / wc_exclusion.
+    """
+    form = request.form
+    apex_tier = (form.get("apex_tier") or "").strip().lower()
+    if apex_tier not in lp.APEX_TIERS:
+        return jsonify(error="A valid tier (starter/professional/enterprise) is required."), 400
+
+    # Required documents present?
+    files = request.files
+    def _has(k):
+        f = files.get(k)
+        return bool(f and f.filename)
+    missing = [k for k in ("gov_id", "insurance", "business_license") if not _has(k)]
+    if missing:
+        return jsonify(error="Missing required documents: " + ", ".join(missing)), 400
+    if not (_has("wc_certificate") ^ _has("wc_exclusion")):
+        return jsonify(error="Provide exactly one of: workers' comp certificate OR exclusion."), 400
+
+    conn = db()
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    try:
+        trades = _form_list(form, "trades")
+        regions = _form_list(form, "regions")
+        pro_id = accounts.create_pro_account(
+            conn, name=form.get("name", ""), company=form.get("company"),
+            email=form.get("email"), phone=form.get("phone"),
+            password=form.get("password", ""), trades=trades, regions=regions)
+        onboarding.update_business_profile(
+            conn, pro_id, trades=trades, regions=regions,
+            years_in_business=(form.get("years_in_business") or None),
+            website=form.get("website"), bio=form.get("bio"))
+        for field, doc_type in _REGISTER_DOCS.items():
+            f = files.get(field)
+            if f and f.filename:
+                onboarding.store_document(conn, pro_id, doc_type, f.filename,
+                                          f.mimetype, f.read())
+        for field, atype in (("bg_sign_name", "background_check_authorization"),
+                             ("agreement_sign_name", "contractor_verification_agreement"),
+                             ("tos_sign_name", "terms_of_service")):
+            name = form.get(field)
+            if name:
+                onboarding.sign_agreement(conn, pro_id, atype, name, ip)
+        # Free Launch Partner seat at the LOCKED tier.
+        claim = lp.claim_seat(conn, pro_id, apex_tier=apex_tier)
+        status = onboarding.submit_for_verification(conn, pro_id)
+        verify_token = accounts.get_pro(conn, pro_id)["email_verify_token"]
+    except Exception as e:
+        conn.close()
+        return jsonify(error=str(e)), 400
+    conn.close()
+
+    site = (config.allowed_origins_list()[0] if isinstance(config.allowed_origins_list(), list)
+            else "https://solaryienconnect.com")
+    verify_url = f"{site}/pro/verify-email.html?token={verify_token}"
+    try:
+        emailer.send(form.get("email"), "Verify your Solaryien Connect email",
+                     f"Welcome to Solaryien Connect. Please verify your email to activate "
+                     f"your account and access your dashboard:\n\n{verify_url}\n\n— Solaryien Connect")
+    except Exception as e:
+        log.warning("Verification email failed: %s", e)
+    if claim:
+        try:
+            subj, body = lp.confirmation_email({"name": form.get("name")}, claim)
+            emailer.send(form.get("email"), subj, body)
+        except Exception as e:
+            log.warning("LP confirmation email failed: %s", e)
+    try:
+        subj, body = onboarding.signup_confirmation_email(
+            {"name": form.get("name")}, lp_claim=claim)
+        emailer.send(form.get("email"), subj, body)
+    except Exception as e:
+        log.warning("Signup confirmation email failed: %s", e)
+
+    return jsonify(pro_id=pro_id, status="pending", apex_tier=apex_tier,
+                   verification_status=status, launch_partner=claim,
+                   verify_url=verify_url, email_verified=False), 201
+
+
 @app.get("/api/launch-partner")
 def launch_partner_status():
     conn = db()
@@ -410,6 +524,33 @@ def checkout_session(pro_id):
     except Exception as e:
         return jsonify(error=str(e)), 400
     return jsonify(checkout_url=url)
+
+
+@app.get("/api/stripe/config")
+def stripe_config():
+    """Expose the publishable key for the embedded modal (safe to share)."""
+    return jsonify(publishable_key=stripe_integration.publishable_key() or "",
+                   configured=stripe_integration.configured())
+
+
+@app.post("/api/checkout/session")
+def checkout_embedded_session():
+    """
+    Embedded Stripe Checkout for any payment touchpoint (post-launch
+    subscription, the $50 background check, add-on seats). Returns a
+    client_secret the in-page modal mounts. Body: {price_key, pro_id?, email?,
+    quantity?}.
+    """
+    if not stripe_integration.configured():
+        return jsonify(error="Stripe is not configured on this server"), 503
+    d = request.get_json(force=True, silent=True) or {}
+    try:
+        secret = stripe_integration.create_embedded_session(
+            d.get("price_key"), pro_id=d.get("pro_id"),
+            customer_email=d.get("email"), quantity=int(d.get("quantity", 1) or 1))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(client_secret=secret)
 
 
 @app.post("/api/stripe/webhook")

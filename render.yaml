@@ -25,19 +25,45 @@ services:
         value: https://solaryienconnect.com/pro/confirmation.html
       - key: CHECKOUT_CANCEL_URL
         value: https://solaryienconnect.com/pro/subscribe.html
+      - key: CHECKOUT_RETURN_URL
+        value: https://solaryienconnect.com/pro/confirmation.html?session_id={CHECKOUT_SESSION_ID}
       # Auto-generated shared secret for the Apex inbound webhook.
       - key: APEX_WEBHOOK_SECRET
         generateValue: true
       # Secrets — set these in the Render dashboard (sync:false = not in blueprint).
       - key: STRIPE_SECRET_KEY
         sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      - key: STRIPE_PRICE_STANDARD
+      # Apex standalone (annual) price IDs
+      - key: STRIPE_PRICE_APEX_STARTER
         sync: false
-      - key: STRIPE_PRICE_PRO
+      - key: STRIPE_PRICE_APEX_PROFESSIONAL
         sync: false
-      - key: STRIPE_PRICE_COMPLETE
+      - key: STRIPE_PRICE_APEX_ENTERPRISE
+        sync: false
+      # Connect standalone (annual) price IDs
+      - key: STRIPE_PRICE_CONNECT_STANDARD_RES
+        sync: false
+      - key: STRIPE_PRICE_CONNECT_STANDARD_COM
+        sync: false
+      - key: STRIPE_PRICE_CONNECT_PRO_RES
+        sync: false
+      - key: STRIPE_PRICE_CONNECT_PRO_COM
+        sync: false
+      # Complete bundle (annual) price IDs
+      - key: STRIPE_PRICE_COMPLETE_STANDARD
+        sync: false
+      - key: STRIPE_PRICE_COMPLETE_PRO
+        sync: false
+      - key: STRIPE_PRICE_COMPLETE_ENTERPRISE
+        sync: false
+      # One-time charges
+      - key: STRIPE_PRICE_BG_CHECK
+        sync: false
+      - key: STRIPE_PRICE_SEAT
         sync: false
     disk:
       name: data

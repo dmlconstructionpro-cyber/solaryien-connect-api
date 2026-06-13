@@ -1,17 +1,23 @@
 """
-Solaryien Connect — Launch Partner offer.
+Solaryien Connect — Launch Partner program (beta).
 
-A pro who signs up during the launch period claims one of 5,000 seats:
-  - Solaryien Apex: 3-month trial at 50% off (Starter/Professional/Enterprise)
-  - Solaryien Connect Standard (3 regions): free for 3 months, bundled
+A pro who onboards during the pre-launch period claims one of 5,000 seats and
+joins as a free beta tester at their chosen tier (Starter / Professional /
+Enterprise). The chosen tier is LOCKED for the whole free period — it can't be
+upgraded until the free months are complete (this stops someone onboarding on a
+small tier free then jumping up mid-program to grab seats/regions for free).
 
-After 3 months Apex converts to normal annual/quarterly pricing and Connect
-Standard converts to quarterly billing unless the pro chooses annual. They can
-cancel anytime before the trial ends. Reminder emails go out 14 and 7 days
-before conversion. When all 5,000 seats are gone the offer ends automatically.
+Program (identical across all tiers):
+  Pre-launch  : pay nothing. 1 month of Solaryien Apex FREE at the chosen tier
+                (full seat count) as a beta tester. A $50 background check is NOT
+                charged at sign-up but must be completed before launch.
+  At launch   : 3 months of Solaryien Connect FREE at the chosen tier, plus
+                3 months of Solaryien Apex at 50% off the chosen tier.
+  After 3 mo  : full pricing at the chosen tier.
 
 The seat counter is a single DB row (launch_partner). Each completed signup
-decrements it by 1; claims are recorded in launch_partner_claims.
+decrements it by 1; claims are recorded in launch_partner_claims. When all seats
+are gone the offer ends automatically.
 """
 import calendar
 import logging
@@ -19,16 +25,20 @@ from datetime import datetime
 
 log = logging.getLogger("solaryien.launch_partner")
 
-TRIAL_MONTHS = 3
+# Free Apex beta access at sign-up, then the post-launch discount window length.
+BETA_MONTHS = 1            # 1 free month of Apex at sign-up (beta tester)
+TRIAL_MONTHS = 3           # at launch: 3 months free Connect + 3 months 50% Apex
 
-# Solaryien Apex 3-month trial — 50% off.
+# Solaryien Apex — annual list price per tier, and the 50%-off Launch Partner
+# price applied for 3 months at launch.
 APEX_TIERS = {
-    "starter":      {"normal": 300,  "launch": 150},
-    "professional": {"normal": 600,  "launch": 300},
-    "enterprise":   {"normal": 1200, "launch": 600},
+    "starter":      {"normal": 1200, "launch": 600,  "seats": 1},
+    "professional": {"normal": 2500, "launch": 1250, "seats": 3},
+    "enterprise":   {"normal": 4000, "launch": 2000, "seats": 5},
 }
-CONNECT_OFFER = ("Free 3-month Solaryien Connect Standard (3 regions), "
-                 "bundled with any Apex trial.")
+CONNECT_OFFER = ("1 month of Apex free now as a beta tester, then at launch "
+                 "3 months of Connect free + 3 months of Apex at 50% off — at "
+                 "your chosen tier. Tier is locked for the free period.")
 
 
 # ── time helpers (injectable now for deterministic tests) ────────────────
@@ -62,7 +72,8 @@ def get_status(conn):
         "active": remaining > 0,        # when False the offer disappears, normal pricing
         "remaining": remaining,         # show ONLY this (never how many signed up)
         "total": total,
-        "trial_months": TRIAL_MONTHS,
+        "beta_months": BETA_MONTHS,     # free Apex months at sign-up
+        "trial_months": TRIAL_MONTHS,   # free Connect + 50%-off Apex months at launch
         "apex_tiers": APEX_TIERS,
         "connect_offer": CONNECT_OFFER,
     }
@@ -105,9 +116,22 @@ def get_claim(conn, pro_id):
 
 
 def set_apex_tier(conn, pro_id, apex_tier):
+    """
+    Set the chosen Apex tier. The tier is LOCKED once chosen for the duration of
+    the free Launch Partner period — it can only be set while still empty, never
+    changed (prevents free mid-program upgrades). Returns the effective tier.
+    """
+    row = conn.execute("SELECT apex_tier FROM launch_partner_claims WHERE pro_id = ?",
+                       (pro_id,)).fetchone()
+    if row and row["apex_tier"]:
+        # Already locked in — ignore change requests, keep the original choice.
+        if (apex_tier or "") != (row["apex_tier"] or ""):
+            log.info("Pro %s tier change blocked (locked at %s)", pro_id, row["apex_tier"])
+        return row["apex_tier"]
     conn.execute("UPDATE launch_partner_claims SET apex_tier = ? WHERE pro_id = ?",
                  (apex_tier, pro_id))
     conn.commit()
+    return apex_tier
 
 
 def cancel(conn, pro_id):
@@ -145,29 +169,36 @@ def confirmation_email(pro, claim):
     tier = (claim.get("apex_tier") or "").strip()
     if tier in APEX_TIERS:
         price = APEX_TIERS[tier]
-        apex_line = (f"  - Solaryien Apex {tier.title()}: 3-month trial at "
-                     f"${price['launch']} (normally ${price['normal']}) — 50% off.\n")
+        seats = price["seats"]
+        beta_line = (f"  - Now (beta): Solaryien Apex {tier.title()} FREE for 1 month — "
+                     f"full {seats}-seat access to test and give feedback.\n")
+        launch_line = (f"  - At launch: 3 months of Connect free + 3 months of Apex "
+                       f"{tier.title()} at 50% off (${price['launch']}, normally "
+                       f"${price['normal']}/yr).\n")
     else:
-        apex_line = "  - Solaryien Apex: 3-month trial at 50% off.\n"
-    return ("Welcome, Launch Partner — your offer is locked in",
+        beta_line = "  - Now (beta): Solaryien Apex FREE for 1 month at your chosen tier.\n"
+        launch_line = ("  - At launch: 3 months of Connect free + 3 months of Apex at "
+                       "50% off your chosen tier.\n")
+    return ("Welcome, Launch Partner — you're in the beta",
             f"Hi {pro.get('name', 'there')},\n\n"
-            f"You're officially a Solaryien Connect Launch Partner.\n\n"
-            f"{apex_line}"
-            f"  - Solaryien Connect Standard (3 regions): free for 3 months.\n\n"
-            f"Your trial runs through {claim['trial_end'][:10]}. After that, Apex converts "
-            f"to normal annual or quarterly pricing and Connect Standard converts to quarterly "
-            f"billing unless you choose annual. Cancel anytime before then from your dashboard "
-            f"to avoid being charged.\n\n— Solaryien Connect")
+            f"You're officially a Solaryien Connect Launch Partner — onboarded free.\n\n"
+            f"{beta_line}{launch_line}"
+            f"  - Your tier is locked in for the entire free period.\n\n"
+            f"One thing to complete before launch: a one-time $50 background check. It is "
+            f"NOT charged at sign-up — you'll get a separate notice with a window to complete "
+            f"it. No contractor is active at launch without it.\n\n"
+            f"As a beta tester your usage, feedback, and bug reports directly shape the "
+            f"platform before we go live. Cancel anytime before full pricing begins from your "
+            f"dashboard.\n\n— Solaryien Connect")
 
 
 def reminder_email(pro, which, claim):
-    return (f"Your Launch Partner trial converts in {which} days",
+    return (f"Your Launch Partner free period ends in {which} days",
             f"Hi {pro.get('name', 'there')},\n\n"
-            f"Your Solaryien Connect Launch Partner trial (50% off Apex + free Connect "
-            f"Standard) converts to regular pricing on {claim['trial_end'][:10]} — "
-            f"{which} days from now.\n\n"
-            f"  - Apex converts to normal annual or quarterly pricing.\n"
-            f"  - Connect Standard converts to quarterly billing unless you choose annual.\n\n"
+            f"Your Solaryien Connect Launch Partner free period (3 months of Connect free + "
+            f"3 months of Apex at 50% off) ends on {claim['trial_end'][:10]} — "
+            f"{which} days from now. After that, full annual pricing begins at your chosen "
+            f"tier.\n\n"
             f"To avoid being charged, cancel before {claim['trial_end'][:10]} from your "
             f"dashboard.\n\n— Solaryien Connect")
 

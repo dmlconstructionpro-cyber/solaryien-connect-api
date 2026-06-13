@@ -23,16 +23,45 @@ SEED_ON_START = _env("SEED_ON_START", "false").lower() in ("1", "true", "yes")
 # ── Stripe ───────────────────────────────────────────────────────────────
 STRIPE_SECRET_KEY = _env("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
-# Map plan -> Stripe Price ID (create these as recurring prices in Stripe).
+# Publishable key — safe to expose; the embedded modal uses it client-side.
+STRIPE_PUBLISHABLE_KEY = _env("STRIPE_PUBLISHABLE_KEY")
+
+# Map price key -> Stripe Price ID. Create these in Stripe (recurring annual for
+# subscriptions; one-time for bg_check + seat) and set the IDs as env vars.
+# Keys match the `purpose`/`price_key` sent by the embedded checkout modal.
 STRIPE_PRICES = {
-    "standard": _env("STRIPE_PRICE_STANDARD"),
-    "pro":      _env("STRIPE_PRICE_PRO"),
-    "complete": _env("STRIPE_PRICE_COMPLETE"),
+    # Apex standalone (annual)
+    "apex_starter":        _env("STRIPE_PRICE_APEX_STARTER"),
+    "apex_professional":   _env("STRIPE_PRICE_APEX_PROFESSIONAL"),
+    "apex_enterprise":     _env("STRIPE_PRICE_APEX_ENTERPRISE"),
+    # Connect standalone (annual)
+    "connect_standard_res": _env("STRIPE_PRICE_CONNECT_STANDARD_RES"),
+    "connect_standard_com": _env("STRIPE_PRICE_CONNECT_STANDARD_COM"),
+    "connect_pro_res":      _env("STRIPE_PRICE_CONNECT_PRO_RES"),
+    "connect_pro_com":      _env("STRIPE_PRICE_CONNECT_PRO_COM"),
+    # Complete bundle (annual)
+    "complete_standard":   _env("STRIPE_PRICE_COMPLETE_STANDARD"),
+    "complete_pro":        _env("STRIPE_PRICE_COMPLETE_PRO"),
+    "complete_enterprise": _env("STRIPE_PRICE_COMPLETE_ENTERPRISE"),
+    # One-time charges
+    "bg_check":            _env("STRIPE_PRICE_BG_CHECK"),     # $50 background check
+    "seat":                _env("STRIPE_PRICE_SEAT"),         # $1,000 add-on seat / yr
+    # Back-compat aliases for the legacy /checkout-session endpoint.
+    "standard":            _env("STRIPE_PRICE_CONNECT_STANDARD_RES"),
+    "pro":                 _env("STRIPE_PRICE_CONNECT_PRO_RES"),
+    "complete":            _env("STRIPE_PRICE_COMPLETE_STANDARD"),
 }
+# One-time (not subscription) price keys — used to pick Stripe checkout mode.
+STRIPE_ONE_TIME = {"bg_check", "seat"}
+
 CHECKOUT_SUCCESS_URL = _env("CHECKOUT_SUCCESS_URL",
                             "https://solaryienconnect.com/pro/confirmation.html")
 CHECKOUT_CANCEL_URL = _env("CHECKOUT_CANCEL_URL",
                            "https://solaryienconnect.com/pro/subscribe.html")
+# Embedded Checkout returns here with {CHECKOUT_SESSION_ID}; the page confirms status.
+CHECKOUT_RETURN_URL = _env("CHECKOUT_RETURN_URL",
+                           "https://solaryienconnect.com/pro/confirmation.html"
+                           "?session_id={CHECKOUT_SESSION_ID}")
 
 # ── Solaryien Apex inbound webhook ───────────────────────────────────────
 # Shared secret used to validate the HMAC-SHA256 signature on incoming
