@@ -1,0 +1,45 @@
+# Render Blueprint for the Solaryien Connect API.
+# In Render: New + > Blueprint, point at the repo containing this backend.
+# If the backend is in a subfolder of the repo, set rootDir accordingly.
+services:
+  - type: web
+    name: solaryien-connect-api
+    runtime: python
+    rootDir: backend            # remove/adjust if backend is the repo root
+    plan: starter               # "starter" or higher is required to attach a disk
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      # SQLite on a persistent disk so data survives deploys (disk below).
+      - key: DATABASE_PATH
+        value: /var/data/solaryien_connect.db
+      - key: ALLOWED_ORIGINS
+        value: https://solaryienconnect.com,https://www.solaryienconnect.com
+      - key: SEED_ON_START
+        value: "true"
+      - key: CHECKOUT_SUCCESS_URL
+        value: https://solaryienconnect.com/pro/confirmation.html
+      - key: CHECKOUT_CANCEL_URL
+        value: https://solaryienconnect.com/pro/subscribe.html
+      # Auto-generated shared secret for the Apex inbound webhook.
+      - key: APEX_WEBHOOK_SECRET
+        generateValue: true
+      # Secrets — set these in the Render dashboard (sync:false = not in blueprint).
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_STANDARD
+        sync: false
+      - key: STRIPE_PRICE_PRO
+        sync: false
+      - key: STRIPE_PRICE_COMPLETE
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
