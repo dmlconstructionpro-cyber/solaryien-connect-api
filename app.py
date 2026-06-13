@@ -31,6 +31,7 @@ from flask import Flask, request, jsonify
 import config
 import database
 import accounts
+import auth
 import commercial as cm
 import csi
 import emailer
@@ -84,6 +85,15 @@ def cors(resp):
 @app.route("/api/<path:_any>", methods=["OPTIONS"])
 def preflight(_any):
     return ("", 204)
+
+
+def _bearer():
+    h = request.headers.get("Authorization", "")
+    return h[7:].strip() if h.startswith("Bearer ") else None
+
+
+def _deny():
+    return jsonify(error="authentication required"), 401
 
 
 @app.get("/healthz")
@@ -171,10 +181,21 @@ def signup():
         # Completing signup claims a Launch Partner seat (decrements the counter)
         # while seats remain. None means the offer is sold out -> normal pricing.
         claim = lp.claim_seat(conn, pro_id, apex_tier=d.get("apex_tier"))
+        verify_token = accounts.get_pro(conn, pro_id)["email_verify_token"]
     except Exception as e:
         conn.close()
         return jsonify(error=str(e)), 400
     conn.close()
+    # Email verification link (must be verified before login / dashboard access).
+    site = (config.allowed_origins_list()[0] if isinstance(config.allowed_origins_list(), list)
+            else "https://solaryienconnect.com")
+    verify_url = f"{site}/pro/verify-email.html?token={verify_token}"
+    try:
+        emailer.send(d.get("email"), "Verify your Solaryien Connect email",
+                     f"Welcome to Solaryien Connect. Please verify your email to activate "
+                     f"your account and access your dashboard:\n\n{verify_url}\n\n— Solaryien Connect")
+    except Exception as e:
+        log.warning("Verification email failed: %s", e)
     # Launch Partner confirmation email (best-effort; never blocks signup).
     if claim:
         try:
@@ -182,7 +203,9 @@ def signup():
             emailer.send(d.get("email"), subj, body)
         except Exception as e:
             log.warning("Confirmation email failed: %s", e)
-    return jsonify(pro_id=pro_id, status="pending", launch_partner=claim), 201
+    # verify_url is also returned so the flow can complete before SMTP is configured.
+    return jsonify(pro_id=pro_id, status="pending", launch_partner=claim,
+                   verify_url=verify_url, email_verified=False), 201
 
 
 @app.get("/api/launch-partner")
@@ -198,6 +221,8 @@ def launch_partner_status():
 def pro_launch_partner(pro_id):
     conn = db()
     try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
         return jsonify(claim=lp.get_claim(conn, pro_id))
     finally:
         conn.close()
@@ -221,12 +246,31 @@ def login():
     conn = db()
     try:
         row = accounts.authenticate(conn, d.get("email"), d.get("password", ""))
+        if row is None:
+            return jsonify(error="Invalid email or password"), 401
+        if not row["email_verified"]:
+            return jsonify(error="Please verify your email before logging in.",
+                           email_unverified=True), 403
+        token = auth.create_session(conn, "pro", row["id"])
+        out = dict(token=token, account_type="pro", pro_id=row["id"], name=row["name"],
+                   company=row["company"], status=row["status"], work_type=row["work_type"],
+                   plan=row["plan"], coverage_type=row["coverage_type"],
+                   verification_status=row["verification_status"])
     finally:
         conn.close()
-    if row is None:
-        return jsonify(error="Invalid email or password"), 401
-    return jsonify(pro_id=row["id"], name=row["name"], company=row["company"],
-                   status=row["status"])
+    return jsonify(out)
+
+
+@app.get("/api/verify-email")
+@app.post("/api/verify-email")
+def verify_email():
+    token = request.args.get("token") or (request.get_json(force=True, silent=True) or {}).get("token")
+    conn = db()
+    try:
+        ok = accounts.verify_email(conn, token)
+    finally:
+        conn.close()
+    return jsonify(verified=ok), (200 if ok else 400)
 
 
 @app.post("/api/pro/<int:pro_id>/subscribe")
@@ -314,10 +358,29 @@ def pro_complete(pro_id):
     return jsonify(ok=True, verification_status=pro["verification_status"] if pro else None)
 
 
+@app.get("/api/pro/<int:pro_id>/me")
+def pro_me(pro_id):
+    """Authenticated pro's own profile — the dashboard calls this to gate access."""
+    conn = db()
+    try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
+        p = accounts.get_pro(conn, pro_id)
+    finally:
+        conn.close()
+    if not p:
+        return _deny()
+    return jsonify(pro_id=p["id"], name=p["name"], company=p["company"], status=p["status"],
+                   work_type=p["work_type"], plan=p["plan"], coverage_type=p["coverage_type"],
+                   verification_status=p["verification_status"], email_verified=bool(p["email_verified"]))
+
+
 @app.get("/api/pro/<int:pro_id>/leads")
 def pro_leads(pro_id):
     conn = db()
     try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
         rows = ld.get_pro_leads(conn, pro_id)
     finally:
         conn.close()
@@ -438,12 +501,14 @@ def owner_login():
     conn = db()
     try:
         row = po.authenticate(conn, d.get("email"), d.get("password", ""))
+        if not row:
+            return jsonify(error="Invalid email or password"), 401
+        token = auth.create_session(conn, "owner", row["id"])
+        out = dict(token=token, account_type="owner", owner_id=row["id"],
+                   first_name=row["first_name"], company_name=row["company_name"])
     finally:
         conn.close()
-    if not row:
-        return jsonify(error="Invalid email or password"), 401
-    return jsonify(account_type="owner", owner_id=row["id"], first_name=row["first_name"],
-                   company_name=row["company_name"])
+    return jsonify(out)
 
 
 @app.post("/commercial/api/login")
@@ -455,11 +520,17 @@ def commercial_login():
     try:
         pro = accounts.authenticate(conn, email, pw)
         if pro:
-            return jsonify(account_type="pro", pro_id=pro["id"], name=pro["name"],
-                           company=pro["company"], work_type=pro["work_type"])
+            if not pro["email_verified"]:
+                return jsonify(error="Please verify your email before logging in.",
+                               email_unverified=True), 403
+            token = auth.create_session(conn, "pro", pro["id"])
+            return jsonify(token=token, account_type="pro", pro_id=pro["id"], name=pro["name"],
+                           company=pro["company"], work_type=pro["work_type"],
+                           plan=pro["plan"], coverage_type=pro["coverage_type"])
         owner = po.authenticate(conn, email, pw)
         if owner:
-            return jsonify(account_type="owner", owner_id=owner["id"],
+            token = auth.create_session(conn, "owner", owner["id"])
+            return jsonify(token=token, account_type="owner", owner_id=owner["id"],
                            first_name=owner["first_name"], company_name=owner["company_name"])
     finally:
         conn.close()
@@ -605,6 +676,8 @@ def commercial_invite(uid):
 def commercial_owner_projects(owner_id):
     conn = db()
     try:
+        if not auth.authorized(conn, _bearer(), "owner", owner_id):
+            return _deny()
         rows = conn.execute("SELECT * FROM commercial_projects WHERE owner_id = ? "
                             "ORDER BY created_at DESC", (owner_id,)).fetchall()
         out = [cm.project_detail(conn, r["project_uid"]) for r in rows]
@@ -617,6 +690,8 @@ def commercial_owner_projects(owner_id):
 def commercial_pro_feed(pro_id):
     conn = db()
     try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
         return jsonify(projects=cm.pro_commercial_projects(conn, pro_id))
     finally:
         conn.close()
@@ -626,6 +701,8 @@ def commercial_pro_feed(pro_id):
 def commercial_pro_bids(pro_id):
     conn = db()
     try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
         rows = cm.pro_bids(conn, pro_id)
         out = [{k: r[k] for k in r.keys() if k != "bid_file_content"} for r in rows]
     finally:

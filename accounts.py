@@ -13,6 +13,7 @@ Passwords are stored as pbkdf2-hmac-sha256 with a per-account salt (stdlib only)
 import hashlib
 import hmac
 import os
+import secrets
 
 import lead_distribution as ld  # for normalize_trade
 
@@ -42,11 +43,13 @@ def create_pro_account(conn, *, name, company, email, phone, password,
     Returns the new pro id.
     """
     salt, pwhash = _hash_password(password)
+    verify_token = secrets.token_urlsafe(24)
     cur = conn.execute(
         """INSERT INTO pros (name, company, email, phone, status, in_good_standing,
-                             password_hash, password_salt, plan, coverage_type)
-           VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)""",
-        (name, company, email, phone, pwhash, salt, plan, coverage_type),
+                             password_hash, password_salt, plan, coverage_type,
+                             email_verified, email_verify_token)
+           VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, 0, ?)""",
+        (name, company, email, phone, pwhash, salt, plan, coverage_type, verify_token),
     )
     pro_id = cur.lastrowid
     for t in trades:
@@ -103,3 +106,14 @@ def authenticate(conn, email, password):
 
 def get_pro(conn, pro_id):
     return conn.execute("SELECT * FROM pros WHERE id = ?", (pro_id,)).fetchone()
+
+
+def verify_email(conn, token):
+    """Mark a pro's email verified via their token. Returns True if it matched."""
+    if not token:
+        return False
+    cur = conn.execute(
+        "UPDATE pros SET email_verified = 1, email_verify_token = NULL WHERE email_verify_token = ?",
+        (token,))
+    conn.commit()
+    return cur.rowcount > 0

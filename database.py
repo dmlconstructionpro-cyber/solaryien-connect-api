@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS pros (
     -- incomplete | pending_verification | approved | rejected
     verification_status TEXT NOT NULL DEFAULT 'incomplete',
     rejection_reason  TEXT,
+    -- email verification (must verify before dashboard access)
+    email_verified    INTEGER NOT NULL DEFAULT 0,
+    email_verify_token TEXT,
     created_at        DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -120,6 +123,14 @@ CREATE TABLE IF NOT EXISTS pro_agreements (
     signed_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
     ip              TEXT,
     UNIQUE (pro_id, agreement_type)
+);
+
+-- ── Auth sessions (bearer tokens issued at login) ───────────────────────
+CREATE TABLE IF NOT EXISTS sessions (
+    token        TEXT PRIMARY KEY,
+    account_type TEXT NOT NULL,                  -- pro | owner
+    account_id   INTEGER NOT NULL,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ═══ COMMERCIAL PLATFORM ═════════════════════════════════════════════════
@@ -277,9 +288,21 @@ def connect(path=":memory:"):
     return conn
 
 
+def _migrate(conn):
+    """Add columns to existing DBs that predate them (no-op on fresh DBs)."""
+    for col, ddl in (("email_verified", "ALTER TABLE pros ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0"),
+                     ("email_verify_token", "ALTER TABLE pros ADD COLUMN email_verify_token TEXT")):
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass  # column already exists
+    conn.commit()
+
+
 def init_db(conn):
     """Create all tables/indexes if they do not already exist."""
     conn.executescript(SCHEMA_SQL)
+    _migrate(conn)
     # Seed the Launch Partner counter exactly once.
     conn.execute(
         "INSERT OR IGNORE INTO launch_partner (id, remaining, total, updated_at) "
