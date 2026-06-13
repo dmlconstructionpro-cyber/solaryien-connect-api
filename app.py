@@ -511,6 +511,90 @@ def pro_lead_counts():
     return jsonify(pros=[dict(r) for r in rows])
 
 
+# ── Public Pro Directory (no auth) ───────────────────────────────────────
+def _pro_public_dict(conn, p):
+    trades = [r["trade"] for r in conn.execute(
+        "SELECT trade FROM pro_trades WHERE pro_id = ?", (p["id"],)).fetchall()]
+    regions = [r["region_code"] for r in conn.execute(
+        "SELECT region_code FROM pro_regions WHERE pro_id = ?", (p["id"],)).fetchall()]
+    return {
+        "pro_id": p["id"], "company": p["company"] or p["name"], "name": p["name"],
+        "trades": trades, "regions": regions,
+        "work_type": p["work_type"] or "both",
+        "bio": p["bio"], "website": p["website"],
+        "years_in_business": p["years_in_business"],
+        # Listed pros are active (vetted + live), so they carry the Verified badge.
+        "verified": (p["status"] == "active") or (p["verification_status"] == "approved"),
+        # No reviews system yet — surfaced as "New" on the card.
+        "rating": None, "review_count": 0,
+    }
+
+
+@app.get("/api/pros/directory")
+def pros_directory():
+    """Public, filterable list of active/verified pros for the Pro Directory."""
+    trade = request.args.get("trade")
+    region = request.args.get("region")
+    work = (request.args.get("work_type") or "").lower()   # residential|commercial|both
+    q = (request.args.get("q") or "").strip().lower()
+    conn = db()
+    try:
+        rows = conn.execute("SELECT * FROM pros WHERE status = 'active'").fetchall()
+        out = []
+        for p in rows:
+            d = _pro_public_dict(conn, p)
+            if trade and trade not in d["trades"]:
+                continue
+            if region and region not in d["regions"]:
+                continue
+            if work and work != "both" and d["work_type"] not in (work, "both"):
+                continue
+            if q and q not in (d["company"] or "").lower() and q not in (d["name"] or "").lower():
+                continue
+            out.append(d)
+    finally:
+        conn.close()
+    return jsonify(pros=out)
+
+
+@app.get("/api/pros/<int:pro_id>/public")
+def pro_public(pro_id):
+    """Public profile for a single pro (Pro Directory detail page)."""
+    conn = db()
+    try:
+        p = accounts.get_pro(conn, pro_id)
+        if not p or p["status"] != "active":
+            return jsonify(error="not found"), 404
+        d = _pro_public_dict(conn, p)
+    finally:
+        conn.close()
+    return jsonify(pro=d)
+
+
+@app.post("/api/pros/<int:pro_id>/quote")
+def pro_quote_request(pro_id):
+    """Homeowner/public quote request to a pro (no login). Emails the pro."""
+    d = request.get_json(force=True, silent=True) or {}
+    conn = db()
+    try:
+        p = accounts.get_pro(conn, pro_id)
+    finally:
+        conn.close()
+    if not p:
+        return jsonify(error="not found"), 404
+    try:
+        emailer.send(p["email"], "New quote request from Solaryien Connect",
+                     f"Hi {p['name']},\n\nYou have a new quote request via your Solaryien "
+                     f"Connect directory profile:\n\n"
+                     f"  Name:  {d.get('name','')}\n"
+                     f"  Email: {d.get('email','')}\n"
+                     f"  Phone: {d.get('phone','')}\n"
+                     f"  Project: {d.get('message','')}\n\n— Solaryien Connect")
+    except Exception as e:
+        log.warning("Quote request email failed: %s", e)
+    return jsonify(ok=True)
+
+
 # ── Stripe subscription payments ─────────────────────────────────────────
 @app.post("/api/pro/<int:pro_id>/checkout-session")
 def checkout_session(pro_id):
