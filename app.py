@@ -595,6 +595,49 @@ def pro_quote_request(pro_id):
     return jsonify(ok=True)
 
 
+# ── Pro profile edit (authenticated — used by the dashboard) ─────────────
+@app.get("/api/pro/<int:pro_id>/profile")
+def pro_profile_get(pro_id):
+    """The pro's own editable profile (prefill for the dashboard editor)."""
+    conn = db()
+    try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
+        p = accounts.get_pro(conn, pro_id)
+        if not p:
+            return _deny()
+        d = _pro_public_dict(conn, p)
+        d["plan"] = p["plan"]
+        d["coverage_type"] = p["coverage_type"]
+        d["email"] = p["email"]
+        d["status"] = p["status"]
+        d["verification_status"] = p["verification_status"]
+    finally:
+        conn.close()
+    return jsonify(profile=d)
+
+
+@app.post("/api/pro/<int:pro_id>/profile")
+def pro_profile_update(pro_id):
+    """Update the pro's own profile (display name, bio, trades, regions, etc.)."""
+    conn = db()
+    try:
+        if not auth.authorized(conn, _bearer(), "pro", pro_id):
+            return _deny()
+        d = request.get_json(force=True, silent=True) or {}
+        if d.get("company"):
+            conn.execute("UPDATE pros SET company = ? WHERE id = ?", (d["company"], pro_id))
+        if d.get("work_type") in ("residential", "commercial", "both"):
+            conn.execute("UPDATE pros SET work_type = ? WHERE id = ?", (d["work_type"], pro_id))
+        conn.commit()
+        onboarding.update_business_profile(
+            conn, pro_id, trades=d.get("trades"), regions=d.get("regions"),
+            years_in_business=d.get("years_in_business"), bio=d.get("bio"))
+    finally:
+        conn.close()
+    return jsonify(ok=True)
+
+
 # ── Stripe subscription payments ─────────────────────────────────────────
 @app.post("/api/pro/<int:pro_id>/checkout-session")
 def checkout_session(pro_id):
